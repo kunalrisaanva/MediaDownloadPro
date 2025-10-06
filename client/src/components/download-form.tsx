@@ -17,6 +17,7 @@ export function DownloadForm() {
   const analyzeMutation = useMutation({
     mutationFn: async (url: string) => {
       const response = await apiRequest("POST", "/api/analyze", { url });
+      console.log("response ---->", response);
       return response.json();
     },
     onSuccess: (data) => {

@@ -14,7 +14,7 @@ interface DownloadProgressProps {
 export function DownloadProgress({ downloadId }: DownloadProgressProps) {
   const [progress, setProgress] = useState(0);
   const { toast } = useToast();
-
+// const response = await apiRequest("POST", "/api/analyze", { url });
   const { data: download, isLoading } = useQuery<DownloadType>({
     queryKey: ["/api/download", downloadId],
     refetchInterval: 1000,
@@ -22,6 +22,7 @@ export function DownloadProgress({ downloadId }: DownloadProgressProps) {
   });
 
   useEffect(() => {
+    // console.log("Download data:", download);
     if (download?.status === "completed") {
       setProgress(100);
       toast({

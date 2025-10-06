@@ -102,6 +102,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post('/api/analyze', async (req, res) => {
     try {
       const { url } = req.body;
+
+      console.log("starting analysis for URL:", url);
       
       if (!url) {
         return res.status(400).json({ error: 'URL is required' });
@@ -163,7 +165,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Start download
   app.post('/api/download', async (req, res) => {
     try {
+
+      console.log("code working");
       const downloadData = insertDownloadSchema.parse(req.body);
+
+      console.log("code working");
       
       const download = await storage.createDownload({
         ...downloadData,
