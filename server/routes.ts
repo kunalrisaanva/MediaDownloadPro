@@ -168,6 +168,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       console.log("code working");
       const downloadData = insertDownloadSchema.parse(req.body);
+      console.log("code working --->", downloadData);
 
       console.log("code working");
       

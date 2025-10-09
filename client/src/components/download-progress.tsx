@@ -22,7 +22,7 @@ export function DownloadProgress({ downloadId }: DownloadProgressProps) {
   });
 
   useEffect(() => {
-    // console.log("Download data:", download);
+    console.log("Download data:", download);
     if (download?.status === "completed") {
       setProgress(100);
       toast({
