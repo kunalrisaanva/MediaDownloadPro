@@ -18,14 +18,17 @@ export interface Download {
   url: string;
   platform: string;
   title: string;
-  thumbnail?: string;
-  duration?: string;
+  thumbnail: string | null;
+  duration: string | null;
   quality: string;
-  fileSize?: string;
-  downloadUrl?: string;
-  status: string;
-  createdAt?: Date;
+  fileSize: string | null;
+  downloadUrl: string | null;
+  status: 'pending' | 'completed' | 'failed';
+  progress: number;
+  createdAt: Date;
 }
+
+export type DownloadType = Download;
 
 export interface DownloadProgress {
   downloadId: number;

@@ -20,6 +20,7 @@ export const downloads = pgTable("downloads", {
   downloadUrl: text("download_url"),
   status: text("status").notNull().default("pending"), // pending, completed, failed
   createdAt: timestamp("created_at").defaultNow(),
+  progress: integer("progress").notNull().default(0),
 });
 
 export const videoInfo = pgTable("video_info", {

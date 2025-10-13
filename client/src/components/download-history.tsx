@@ -5,9 +5,11 @@ import { Download, Trash2, Clock, Monitor } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import type { Download as DownloadType } from "@/types";
+import {useMutation, useQueryClient} from "@tanstack/react-query";
 
 export function DownloadHistory() {
   const { toast } = useToast();
+  const queryClient = useQueryClient();
 
   const { data: downloads, isLoading } = useQuery<DownloadType[]>({
     queryKey: ["/api/downloads/recent"],
@@ -21,14 +23,94 @@ export function DownloadHistory() {
     });
   };
 
+  const clearHistoryMutation = useMutation({
+    mutationFn: async () => {
+      const response = await fetch('/api/downloads', {
+        method: 'DELETE',
+      });
+      if (!response.ok) {
+        throw new Error('Failed to clear history');
+      }
+    },
+    onMutate: async () => {
+      await queryClient.cancelQueries({ queryKey: ["/api/downloads/recent"] });
+      const previousDownloads = queryClient.getQueryData(["/api/downloads/recent"]);
+      queryClient.setQueryData(["/api/downloads/recent"], []);
+      return { previousDownloads };
+    },
+    onError: (err, variables, context) => {
+      queryClient.setQueryData(["/api/downloads/recent"], context?.previousDownloads);
+      toast({
+        title: "Error",
+        description: "Failed to clear download history",
+        variant: "destructive",
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/downloads/recent"] });
+      toast({
+        title: "Success",
+        description: "All downloads have been removed from history",
+      });
+    },
+  });
+
+
+
+
+const removeDownloadMutation = useMutation({
+    mutationFn: async (downloadId: number) => {
+      const response = await fetch(`/api/downloads/${downloadId}`, {
+        method: 'DELETE',
+      });
+      if (!response.ok) {
+        throw new Error('Failed to remove download');
+      }
+      return downloadId;
+    },
+    onMutate: async (downloadId) => {
+      // Cancel any outgoing refetches
+      await queryClient.cancelQueries({ queryKey: ["/api/downloads/recent"] });
+
+      // Snapshot the previous value
+      const previousDownloads = queryClient.getQueryData(["/api/downloads/recent"]);
+
+      // Optimistically update to the new value
+      queryClient.setQueryData<DownloadType[]>(["/api/downloads/recent"], (old) => 
+        old?.filter(d => d.id !== downloadId) ?? []
+      );
+
+      return { previousDownloads };
+    },
+    onError: (err, downloadId, context) => {
+      // If the mutation fails, use the context returned from onMutate to roll back
+      queryClient.setQueryData(["/api/downloads/recent"], context?.previousDownloads);
+      
+      toast({
+        title: "Error",
+        description: "Failed to remove download from history",
+        variant: "destructive",
+      });
+    },
+    onSettled: () => {
+      // Always refetch after error or success
+      queryClient.invalidateQueries({ queryKey: ["/api/downloads/recent"] });
+    }
+  });
+
   const handleRemoveFromHistory = (downloadId: number) => {
-    toast({
-      title: "Removed from history",
-      description: "Download has been removed from history",
+    removeDownloadMutation.mutate(downloadId, {
+      onSuccess: () => {
+        toast({
+          title: "Success",
+          description: "Download removed from history",
+        });
+      }
     });
   };
 
   const handleClearHistory = () => {
+    clearHistoryMutation.mutate();
     toast({
       title: "History cleared",
       description: "All downloads have been removed from history",

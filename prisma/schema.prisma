@@ -1,0 +1,4 @@
+model Download {
+  id        Int      @id @default(autoincrement())
+  // ...other fields...
+}

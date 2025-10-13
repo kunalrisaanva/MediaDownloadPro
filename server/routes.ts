@@ -52,7 +52,7 @@ async function extractVideoInfo(url: string): Promise<any> {
 }
 
 // Download video using yt-dlp
-async function downloadVideo(url: string, quality: string = 'best'): Promise<string> {
+async function downloadVideo(url: string, quality: string = 'best', downloadId: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const outputDir = path.join(process.cwd(), 'downloads');
     if (!fs.existsSync(outputDir)) {
@@ -65,30 +65,48 @@ async function downloadVideo(url: string, quality: string = 'best'): Promise<str
     const ytdlp = spawn('yt-dlp', [
       '-f', formatSelector,
       '-o', outputTemplate,
+      '--progress',
       url
     ]);
 
     let stdout = '';
     let stderr = '';
 
-    ytdlp.stdout.on('data', (data) => {
+    ytdlp.stdout.on('data', async (data) => {
       stdout += data.toString();
+      
+      // Improved progress parsing
+      const progressMatch = data.toString().match(/(\d+\.?\d*)%/);
+      if (progressMatch) {
+        const progress = parseFloat(progressMatch[1]);
+        try {
+          await storage.updateDownloadProgress(downloadId, progress);
+        } catch (error) {
+          console.error('Failed to update progress:', error);
+        }
+      }
     });
 
-    ytdlp.stderr.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    ytdlp.on('close', (code) => {
+    ytdlp.on('close', async (code) => {
       if (code === 0) {
-        // Extract filename from output
         const lines = stdout.split('\n');
-        const downloadLine = lines.find(line => line.includes('has already been downloaded'));
-        if (downloadLine) {
-          const filename = downloadLine.split('] ')[1].split(' has already')[0];
+        const filenameLine = lines.find(line => line.includes('[download] Destination:'));
+        let filename = '';
+        
+        if (filenameLine) {
+          filename = filenameLine.split('Destination: ')[1];
+        } else {
+          const downloadLine = lines.find(line => line.includes('has already been downloaded'));
+          if (downloadLine) {
+            filename = downloadLine.split('] ')[1].split(' has already')[0];
+          }
+        }
+        
+        if (filename) {
+          await storage.updateDownloadProgress(downloadId, 100);
           resolve(filename);
         } else {
-          resolve('Downloaded successfully');
+          reject(new Error('Could not determine output filename'));
         }
       } else {
         reject(new Error(`Download failed: ${stderr}`));
@@ -165,16 +183,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Start download
   app.post('/api/download', async (req, res) => {
     try {
-
-      console.log("code working");
       const downloadData = insertDownloadSchema.parse(req.body);
-      console.log("code working --->", downloadData);
-
-      console.log("code working");
-      
       const download = await storage.createDownload({
         ...downloadData,
         status: 'pending'
+        // progress: 0 // Remove this line if the type does not support 'progress'
       });
 
       res.json({ downloadId: download.id });
@@ -182,8 +195,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Start download process in background
       (async () => {
         try {
-          const downloadUrl = await downloadVideo(downloadData.url, downloadData.quality);
+          const downloadUrl = await downloadVideo(downloadData.url, downloadData.quality, download.id);
           await storage.updateDownloadStatus(download.id, 'completed', downloadUrl);
+          await storage.updateDownloadProgress(download.id, 100);
         } catch (error) {
           console.error('Download error:', error);
           await storage.updateDownloadStatus(download.id, 'failed');
@@ -224,6 +238,38 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // delete download by id
+  // app.delete('/api/downloads/:id', async (req, res) => {
+  //   try {
+  //     const { id } = req.params;
+  //     await storage.deleteDownload(parseInt(id));
+  //     res.status(200).json({ message: 'Download removed' });
+  //   } catch (error) {
+  //     res.status(500).json({ error: 'Failed to remove download' });
+  //   }
+  // });
+app.delete('/api/downloads/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    
+    if (isNaN(id)) {
+      return res.status(400).json({ error: 'Invalid download ID' });
+    }
+
+    console.log("Deleting download with ID:", id);
+    
+    await storage.deleteDownload(id);
+    console.log("Download deleted successfully");
+    
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    console.error('Delete download error:', error);
+    if (typeof error === 'object' && error !== null && 'message' in error && typeof (error as any).message === 'string' && (error as any).message.includes('not found')) {
+      return res.status(404).json({ error: 'Download not found' });
+    }
+    return res.status(500).json({ error: 'Failed to delete download' });
+  }
+});
   // Serve downloaded files
   app.get('/api/download/file/:filename', (req, res) => {
     const filename = req.params.filename;
@@ -233,6 +279,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.download(filePath);
     } else {
       res.status(404).json({ error: 'File not found' });
+    }
+  });
+
+  // Clear all downloads
+  app.delete('/api/downloads', async (req, res) => {
+    try {
+      await storage.clearAllDownloads();
+      return res.status(200).json({ success: true });
+    } catch (error) {
+      console.error('Clear history error:', error);
+      return res.status(500).json({ error: 'Failed to clear download history' });
+    }
+  });
+
+  app.post('/api/download/:id/cancel', async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ message: 'Invalid download ID' });
+      }
+
+      await storage.updateDownloadStatus(id, 'failed');
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Cancel download error:', error);
+      res.status(500).json({ message: 'Failed to cancel download' });
     }
   });
 

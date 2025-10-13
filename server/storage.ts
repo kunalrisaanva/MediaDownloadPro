@@ -7,12 +7,21 @@ export interface IStorage {
   getDownloadsByStatus(status: string): Promise<Download[]>;
   updateDownloadStatus(id: number, status: string, downloadUrl?: string): Promise<void>;
   getRecentDownloads(limit?: number): Promise<Download[]>;
+
+
+  deleteDownload(id: number): Promise<void>;
+  clearAllDownloads(): Promise<void>;
   
   // Video info methods
   getVideoInfo(url: string): Promise<VideoInfo | undefined>;
   saveVideoInfo(videoInfo: InsertVideoInfo): Promise<VideoInfo>;
   updateVideoInfo(url: string, updates: Partial<InsertVideoInfo>): Promise<void>;
+
+  updateDownloadProgress(id: number, progress: number): Promise<void>;
 }
+
+
+
 
 export class MemStorage implements IStorage {
   private downloads: Map<number, Download> = new Map();
@@ -31,6 +40,7 @@ export class MemStorage implements IStorage {
       thumbnail: insertDownload.thumbnail || null,
       downloadUrl: insertDownload.downloadUrl || null,
       status: insertDownload.status || "pending",
+      progress: 0, // Initialize progress to 0
     };
     this.downloads.set(id, download);
     return download;
@@ -46,13 +56,18 @@ export class MemStorage implements IStorage {
 
   async updateDownloadStatus(id: number, status: string, downloadUrl?: string): Promise<void> {
     const download = this.downloads.get(id);
-    if (download) {
-      download.status = status;
-      if (downloadUrl) {
-        download.downloadUrl = downloadUrl;
-      }
-      this.downloads.set(id, download);
+    if (!download) {
+      throw new Error(`Download with id ${id} not found`);
     }
+
+    const updatedDownload: Download = {
+      ...download,
+      status,
+      downloadUrl: downloadUrl || download.downloadUrl,
+      progress: status === 'completed' ? 100 : download.progress, // Set progress to 100 when completed
+    };
+
+    this.downloads.set(id, updatedDownload);
   }
 
   async getRecentDownloads(limit = 10): Promise<Download[]> {
@@ -89,6 +104,40 @@ export class MemStorage implements IStorage {
       const updated = { ...existing, ...updates, lastUpdated: new Date() };
       this.videoInfos.set(url, updated);
     }
+  }
+
+  async updateDownloadProgress(id: number, progress: number): Promise<void> {
+    const download = this.downloads.get(id);
+    if (!download) {
+      throw new Error(`Download with id ${id} not found`);
+    }
+    
+    // Ensure progress is a valid number
+    if (typeof progress !== 'number' || isNaN(progress)) {
+      throw new Error('Invalid progress value');
+    }
+
+    // Create new download object with updated progress
+    const updatedDownload: Download = {
+      ...download,
+      progress: Math.min(Math.max(0, Math.round(progress)), 100), // Round and clamp between 0-100
+      status: progress >= 100 ? 'completed' : download.status, // Auto-update status when progress is 100%
+    };
+    
+    // Update the storage
+    this.downloads.set(id, updatedDownload);
+  }
+
+  async deleteDownload(id: number): Promise<void> {
+    const download = this.downloads.get(id);
+    if (!download) {
+      throw new Error(`Download with id ${id} not found`);
+    }
+    this.downloads.delete(id);
+  }
+
+  async clearAllDownloads(): Promise<void> {
+    this.downloads.clear();
   }
 }
 
