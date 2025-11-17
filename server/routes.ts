@@ -51,65 +51,110 @@ async function extractVideoInfo(url: string): Promise<any> {
   });
 }
 
-// Download video using yt-dlp
-async function downloadVideo(url: string, quality: string = 'best', downloadId: number): Promise<string> {
+// NEW: Stream video directly to client
+async function streamVideoToClient(url: string, quality: string, res: any, downloadId: number): Promise<void> {
   return new Promise((resolve, reject) => {
-    const outputDir = path.join(process.cwd(), 'downloads');
-    if (!fs.existsSync(outputDir)) {
-      fs.mkdirSync(outputDir, { recursive: true });
-    }
-
-    const outputTemplate = path.join(outputDir, '%(title)s.%(ext)s');
     const formatSelector = quality === 'audio' ? 'bestaudio' : `best[height<=${quality.replace('p', '')}]`;
 
-    const ytdlp = spawn('yt-dlp', [
-      '-f', formatSelector,
-      '-o', outputTemplate,
-      '--progress',
+    // First get video info to set filename
+    const infoProcess = spawn('yt-dlp', [
+      '--dump-json',
+      '--no-playlist',
       url
     ]);
 
-    let stdout = '';
-    let stderr = '';
-
-    ytdlp.stdout.on('data', async (data) => {
-      stdout += data.toString();
-      
-      // Improved progress parsing
-      const progressMatch = data.toString().match(/(\d+\.?\d*)%/);
-      if (progressMatch) {
-        const progress = parseFloat(progressMatch[1]);
-        try {
-          await storage.updateDownloadProgress(downloadId, progress);
-        } catch (error) {
-          console.error('Failed to update progress:', error);
-        }
-      }
+    let infoData = '';
+    
+    infoProcess.stdout.on('data', (data) => {
+      infoData += data.toString();
     });
 
-    ytdlp.on('close', async (code) => {
-      if (code === 0) {
-        const lines = stdout.split('\n');
-        const filenameLine = lines.find(line => line.includes('[download] Destination:'));
-        let filename = '';
+    infoProcess.on('close', async (infoCode) => {
+      if (infoCode !== 0) {
+        reject(new Error('Failed to get video info'));
+        return;
+      }
+
+      try {
+        const videoInfo = JSON.parse(infoData);
+        const ext = quality === 'audio' ? 'mp3' : 'mp4';
+        const filename = `${videoInfo.title}.${ext}`.replace(/[/\\?%*:|"<>]/g, '-');
         
-        if (filenameLine) {
-          filename = filenameLine.split('Destination: ')[1];
-        } else {
-          const downloadLine = lines.find(line => line.includes('has already been downloaded'));
-          if (downloadLine) {
-            filename = downloadLine.split('] ')[1].split(' has already')[0];
+        // Set headers for download
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+        res.setHeader('Content-Type', quality === 'audio' ? 'audio/mpeg' : 'video/mp4');
+        res.setHeader('Transfer-Encoding', 'chunked');
+
+        // Start download process
+        const ytdlp = spawn('yt-dlp', [
+          '-f', formatSelector,
+          '-o', '-', // Output to stdout
+          '--newline', // Progress on new lines
+          url
+        ]);
+
+        let totalSize = 0;
+        let downloadedSize = 0;
+
+        // Pipe video data to response
+        ytdlp.stdout.on('data', (chunk) => {
+          downloadedSize += chunk.length;
+          res.write(chunk);
+          
+          // Update progress (approximate)
+          if (totalSize > 0) {
+            const progress = Math.min(Math.round((downloadedSize / totalSize) * 100), 99);
+            storage.updateDownloadProgress(downloadId, progress).catch(console.error);
           }
-        }
-        
-        if (filename) {
-          await storage.updateDownloadProgress(downloadId, 100);
-          resolve(filename);
-        } else {
-          reject(new Error('Could not determine output filename'));
-        }
-      } else {
-        reject(new Error(`Download failed: ${stderr}`));
+        });
+
+        ytdlp.stderr.on('data', (data) => {
+          const output = data.toString();
+          console.log('yt-dlp:', output);
+          
+          // Try to extract total size for progress calculation
+          const sizeMatch = output.match(/\[download\]\s+(\d+\.\d+)([KMG])iB/);
+          if (sizeMatch && totalSize === 0) {
+            const size = parseFloat(sizeMatch[1]);
+            const unit = sizeMatch[2];
+            totalSize = unit === 'M' ? size * 1024 * 1024 : 
+                       unit === 'G' ? size * 1024 * 1024 * 1024 : 
+                       size * 1024;
+          }
+        });
+
+        ytdlp.on('close', async (code) => {
+          if (code === 0) {
+            await storage.updateDownloadProgress(downloadId, 100);
+            await storage.updateDownloadStatus(downloadId, 'completed', filename);
+            res.end();
+            resolve();
+          } else {
+            await storage.updateDownloadStatus(downloadId, 'failed');
+            if (!res.headersSent) {
+              res.status(500).json({ error: 'Download failed' });
+            }
+            reject(new Error('Download failed'));
+          }
+        });
+
+        ytdlp.on('error', async (error) => {
+          console.error('yt-dlp error:', error);
+          await storage.updateDownloadStatus(downloadId, 'failed');
+          if (!res.headersSent) {
+            res.status(500).json({ error: 'Download process error' });
+          }
+          reject(error);
+        });
+
+        // Handle client disconnect
+        res.on('close', () => {
+          console.log('Client disconnected, killing yt-dlp process');
+          ytdlp.kill();
+        });
+
+      } catch (error) {
+        reject(error);
       }
     });
   });
@@ -180,32 +225,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Start download
+  // UPDATED: Start download and stream to client
   app.post('/api/download', async (req, res) => {
     try {
       const downloadData = insertDownloadSchema.parse(req.body);
+      
+      // Create download record
       const download = await storage.createDownload({
         ...downloadData,
         status: 'pending'
-        // progress: 0 // Remove this line if the type does not support 'progress'
       });
 
-      res.json({ downloadId: download.id });
+      console.log('Starting download for:', downloadData.url);
 
-      // Start download process in background
-      (async () => {
-        try {
-          const downloadUrl = await downloadVideo(downloadData.url, downloadData.quality, download.id);
-          await storage.updateDownloadStatus(download.id, 'completed', downloadUrl);
-          await storage.updateDownloadProgress(download.id, 100);
-        } catch (error) {
-          console.error('Download error:', error);
-          await storage.updateDownloadStatus(download.id, 'failed');
-        }
-      })();
+      // Stream video directly to client
+      await streamVideoToClient(downloadData.url, downloadData.quality, res, download.id);
+
     } catch (error) {
       console.error('Download start error:', error);
-      res.status(500).json({ error: 'Failed to start download' });
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to start download' });
+      }
     }
   });
 
@@ -238,47 +278,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // delete download by id
-  // app.delete('/api/downloads/:id', async (req, res) => {
-  //   try {
-  //     const { id } = req.params;
-  //     await storage.deleteDownload(parseInt(id));
-  //     res.status(200).json({ message: 'Download removed' });
-  //   } catch (error) {
-  //     res.status(500).json({ error: 'Failed to remove download' });
-  //   }
-  // });
-app.delete('/api/downloads/:id', async (req, res) => {
-  try {
-    const id = parseInt(req.params.id);
-    
-    if (isNaN(id)) {
-      return res.status(400).json({ error: 'Invalid download ID' });
-    }
+  // Delete download by id
+  app.delete('/api/downloads/:id', async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      
+      if (isNaN(id)) {
+        return res.status(400).json({ error: 'Invalid download ID' });
+      }
 
-    console.log("Deleting download with ID:", id);
-    
-    await storage.deleteDownload(id);
-    console.log("Download deleted successfully");
-    
-    return res.status(200).json({ success: true });
-  } catch (error) {
-    console.error('Delete download error:', error);
-    if (typeof error === 'object' && error !== null && 'message' in error && typeof (error as any).message === 'string' && (error as any).message.includes('not found')) {
-      return res.status(404).json({ error: 'Download not found' });
-    }
-    return res.status(500).json({ error: 'Failed to delete download' });
-  }
-});
-  // Serve downloaded files
-  app.get('/api/download/file/:filename', (req, res) => {
-    const filename = req.params.filename;
-    const filePath = path.join(process.cwd(), 'downloads', filename);
-    
-    if (fs.existsSync(filePath)) {
-      res.download(filePath);
-    } else {
-      res.status(404).json({ error: 'File not found' });
+      console.log("Deleting download with ID:", id);
+      
+      await storage.deleteDownload(id);
+      console.log("Download deleted successfully");
+      
+      return res.status(200).json({ success: true });
+    } catch (error) {
+      console.error('Delete download error:', error);
+      if (typeof error === 'object' && error !== null && 'message' in error && typeof (error as any).message === 'string' && (error as any).message.includes('not found')) {
+        return res.status(404).json({ error: 'Download not found' });
+      }
+      return res.status(500).json({ error: 'Failed to delete download' });
     }
   });
 
@@ -293,6 +313,7 @@ app.delete('/api/downloads/:id', async (req, res) => {
     }
   });
 
+  // Cancel download
   app.post('/api/download/:id/cancel', async (req, res) => {
     try {
       const id = parseInt(req.params.id);

@@ -4,11 +4,9 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
-import { Download, Copy, QrCode, Video, Music, Clock, Eye, Calendar } from "lucide-react";
+import { Progress } from "@/components/ui/progress";
+import { Download, Copy, QrCode, Video, Music, Clock, Eye } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { useMutation } from "@tanstack/react-query";
-import { apiRequest } from "@/lib/queryClient";
-import { DownloadProgress } from "@/components/download-progress";
 import type { VideoInfo } from "@/types";
 
 interface VideoPreviewProps {
@@ -18,47 +16,118 @@ interface VideoPreviewProps {
 export function VideoPreview({ videoInfo }: VideoPreviewProps) {
   const [selectedQuality, setSelectedQuality] = useState("720p");
   const [downloadType, setDownloadType] = useState("video");
-  const [downloadId, setDownloadId] = useState<number | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [progress, setProgress] = useState(0);
   const { toast } = useToast();
 
-  const downloadMutation = useMutation({
-    mutationFn: async ({ url, quality, title, platform, thumbnail, duration }: any) => {
-      const response = await apiRequest("POST", "/api/download", {
-        url,
-        platform,
-        title,
-        thumbnail,
-        duration,
-        quality,
-        fileSize: "Unknown",
+  const handleDownload = async () => {
+    try {
+      setDownloading(true);
+      setProgress(0);
+
+      const quality = downloadType === "audio" ? "audio" : selectedQuality;
+
+      // Make request to download endpoint
+      const response = await fetch('/api/download', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          url: videoInfo.url,
+          platform: videoInfo.platform,
+          title: videoInfo.title,
+          thumbnail: videoInfo.thumbnail,
+          duration: videoInfo.duration,
+          quality: quality,
+          fileSize: "Unknown",
+        }),
       });
-      return response.json();
-    },
-    onSuccess: (data) => {
-      setDownloadId(data.downloadId);
+
+      if (!response.ok) {
+        throw new Error('Download failed');
+      }
+
+      // Get filename from Content-Disposition header
+      const contentDisposition = response.headers.get('Content-Disposition');
+      let filename = 'video.mp4';
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+        if (filenameMatch && filenameMatch[1]) {
+          filename = decodeURIComponent(filenameMatch[1].replace(/['"]/g, ''));
+        }
+      }
+
+      // Read the stream with progress tracking
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('Stream not supported');
+      }
+
+      const contentLength = response.headers.get('Content-Length');
+      const total = contentLength ? parseInt(contentLength, 10) : 0;
+
+      const chunks: Uint8Array[] = [];
+      let receivedLength = 0;
+
+      // Read stream
+      while (true) {
+        const { done, value } = await reader.read();
+
+        if (done) break;
+
+        chunks.push(value);
+        receivedLength += value.length;
+
+        // Update progress
+        if (total > 0) {
+          const currentProgress = Math.round((receivedLength / total) * 100);
+          setProgress(currentProgress);
+        } else {
+          // Indeterminate progress
+          setProgress((prev) => Math.min(prev + 5, 95));
+        }
+      }
+
+      // Combine chunks into blob
+      // Ensure each chunk is converted to an ArrayBuffer-backed Uint8Array so Blob receives ArrayBuffer parts
+      const blob = new Blob(chunks.map((c) => new Uint8Array(c).buffer));
+      
+      // Create download link
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      
+      // Cleanup
+      window.URL.revokeObjectURL(downloadUrl);
+      document.body.removeChild(a);
+
+      setProgress(100);
+
       toast({
-        title: "Download started",
-        description: "Your video is being prepared for download",
+        title: "Download complete",
+        description: "Video has been downloaded to your device",
       });
-    },
-    onError: (error) => {
+
+      // Reset after a delay
+      setTimeout(() => {
+        setDownloading(false);
+        setProgress(0);
+      }, 2000);
+
+    } catch (error) {
+      console.error('Download error:', error);
       toast({
         title: "Download failed",
-        description: error.message,
+        description: error instanceof Error ? error.message : "Please try again",
         variant: "destructive",
       });
-    },
-  });
-
-  const handleDownload = () => {
-    downloadMutation.mutate({
-      url: videoInfo.url,
-      quality: downloadType === "audio" ? "audio" : selectedQuality,
-      title: videoInfo.title,
-      platform: videoInfo.platform,
-      thumbnail: videoInfo.thumbnail,
-      duration: videoInfo.duration,
-    });
+      setDownloading(false);
+      setProgress(0);
+    }
   };
 
   const handleCopyLink = async () => {
@@ -76,10 +145,6 @@ export function VideoPreview({ videoInfo }: VideoPreviewProps) {
       });
     }
   };
-
-  if (downloadId) {
-    return <DownloadProgress downloadId={downloadId} />;
-  }
 
   return (
     <Card className="max-w-6xl mx-auto shadow-2xl">
@@ -144,8 +209,19 @@ export function VideoPreview({ videoInfo }: VideoPreviewProps) {
               Download Options
             </h4>
             
+            {/* Show progress if downloading */}
+            {downloading && (
+              <div className="space-y-2">
+                <div className="flex justify-between text-sm">
+                  <span className="text-gray-600 dark:text-gray-400">Downloading...</span>
+                  <span className="font-medium text-gray-900 dark:text-white">{progress}%</span>
+                </div>
+                <Progress value={progress} className="h-2" />
+              </div>
+            )}
+            
             {/* Quality Selection */}
-            {videoInfo.availableQualities && videoInfo.availableQualities.length > 0 && (
+            {!downloading && videoInfo.availableQualities && videoInfo.availableQualities.length > 0 && (
               <div className="space-y-3">
                 <Label className="text-sm font-medium text-gray-700 dark:text-gray-300">
                   Video Quality
@@ -188,54 +264,56 @@ export function VideoPreview({ videoInfo }: VideoPreviewProps) {
             )}
 
             {/* Download Type */}
-            <div className="space-y-3">
-              <Label className="text-sm font-medium text-gray-700 dark:text-gray-300">
-                Download Type
-              </Label>
-              <RadioGroup value={downloadType} onValueChange={setDownloadType}>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <RadioGroupItem value="video" id="video" className="sr-only" />
-                    <Label htmlFor="video" className="cursor-pointer">
-                      <div className="flex items-center justify-center p-3 border border-gray-200 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">
-                        <div className="text-center">
-                          <Video className="w-8 h-8 text-blue-600 dark:text-blue-400 mx-auto mb-2" />
-                          <span className="block text-sm font-medium text-gray-900 dark:text-white">
-                            Video + Audio
-                          </span>
+            {!downloading && (
+              <div className="space-y-3">
+                <Label className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  Download Type
+                </Label>
+                <RadioGroup value={downloadType} onValueChange={setDownloadType}>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <RadioGroupItem value="video" id="video" className="sr-only" />
+                      <Label htmlFor="video" className="cursor-pointer">
+                        <div className="flex items-center justify-center p-3 border border-gray-200 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">
+                          <div className="text-center">
+                            <Video className="w-8 h-8 text-blue-600 dark:text-blue-400 mx-auto mb-2" />
+                            <span className="block text-sm font-medium text-gray-900 dark:text-white">
+                              Video + Audio
+                            </span>
+                          </div>
                         </div>
-                      </div>
-                    </Label>
-                  </div>
-                  
-                  <div>
-                    <RadioGroupItem value="audio" id="audio" className="sr-only" />
-                    <Label htmlFor="audio" className="cursor-pointer">
-                      <div className="flex items-center justify-center p-3 border border-gray-200 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">
-                        <div className="text-center">
-                          <Music className="w-8 h-8 text-purple-600 dark:text-purple-400 mx-auto mb-2" />
-                          <span className="block text-sm font-medium text-gray-900 dark:text-white">
-                            Audio Only
-                          </span>
+                      </Label>
+                    </div>
+                    
+                    <div>
+                      <RadioGroupItem value="audio" id="audio" className="sr-only" />
+                      <Label htmlFor="audio" className="cursor-pointer">
+                        <div className="flex items-center justify-center p-3 border border-gray-200 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">
+                          <div className="text-center">
+                            <Music className="w-8 h-8 text-purple-600 dark:text-purple-400 mx-auto mb-2" />
+                            <span className="block text-sm font-medium text-gray-900 dark:text-white">
+                              Audio Only
+                            </span>
+                          </div>
                         </div>
-                      </div>
-                    </Label>
+                      </Label>
+                    </div>
                   </div>
-                </div>
-              </RadioGroup>
-            </div>
+                </RadioGroup>
+              </div>
+            )}
 
             {/* Download Actions */}
             <div className="space-y-3">
               <Button
                 onClick={handleDownload}
-                disabled={downloadMutation.isPending}
-                className="w-full bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 text-white font-semibold py-4 px-6 rounded-xl transition-all duration-200 transform hover:scale-105 shadow-lg"
+                disabled={downloading}
+                className="w-full bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 text-white font-semibold py-4 px-6 rounded-xl transition-all duration-200 transform hover:scale-105 shadow-lg disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
               >
-                {downloadMutation.isPending ? (
+                {downloading ? (
                   <>
-                    <Download className="mr-2 h-4 w-4 animate-spin" />
-                    Starting...
+                    <Download className="mr-2 h-4 w-4 animate-pulse" />
+                    Downloading... {progress}%
                   </>
                 ) : (
                   <>
@@ -245,25 +323,27 @@ export function VideoPreview({ videoInfo }: VideoPreviewProps) {
                 )}
               </Button>
               
-              <div className="grid grid-cols-2 gap-3">
-                <Button
-                  variant="outline"
-                  onClick={handleCopyLink}
-                  className="flex items-center justify-center"
-                >
-                  <Copy className="mr-2 h-4 w-4" />
-                  Copy Link
-                </Button>
-                
-                <Button
-                  variant="outline"
-                  className="flex items-center justify-center"
-                  onClick={() => toast({ title: "QR Code feature coming soon!" })}
-                >
-                  <QrCode className="mr-2 h-4 w-4" />
-                  QR Code
-                </Button>
-              </div>
+              {!downloading && (
+                <div className="grid grid-cols-2 gap-3">
+                  <Button
+                    variant="outline"
+                    onClick={handleCopyLink}
+                    className="flex items-center justify-center"
+                  >
+                    <Copy className="mr-2 h-4 w-4" />
+                    Copy Link
+                  </Button>
+                  
+                  <Button
+                    variant="outline"
+                    className="flex items-center justify-center"
+                    onClick={() => toast({ title: "QR Code feature coming soon!" })}
+                  >
+                    <QrCode className="mr-2 h-4 w-4" />
+                    QR Code
+                  </Button>
+                </div>
+              )}
             </div>
           </div>
         </div>
